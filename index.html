@@ -118,6 +118,7 @@ input::placeholder{color:var(--text-3);}
 .mat-list{display:flex;flex-direction:column;gap:10px;}
 .mat-item{background:var(--white);border:1.5px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;transition:all 0.18s;box-shadow:var(--shadow-1);}
 .mat-item:hover{border-color:var(--green);box-shadow:var(--shadow-2);transform:translateY(-1px);}
+.mat-item.drag-over{border-color:var(--green);border-style:dashed;background:var(--green-bg);transform:translateY(-2px);box-shadow:var(--shadow-3);}
 .mat-thumb{width:52px;height:52px;border-radius:var(--radius-lg);object-fit:cover;border:1.5px solid var(--border);flex-shrink:0;background:var(--surface);display:flex;align-items:center;justify-content:center;color:var(--text-3);font-size:22px;overflow:hidden;}
 .mat-thumb img{width:100%;height:100%;object-fit:cover;}
 .mat-name{font-size:15px;font-weight:700;color:var(--dark-blue);}
@@ -430,12 +431,12 @@ var SEED_MATERIALS = [{"id":"Mmpm1befpBCN","name":"Compression Trim","sku":"CP-4
 // ── LOAD / SAVE ──
 async function loadAll() {
   const [mats, txs, staff] = await Promise.all([
-    sbFetch('/rest/v1/materials?select=*&order=created_at.asc'),
+    sbFetch('/rest/v1/materials?select=*&order=sort_order.asc,created_at.asc'),
     sbFetch('/rest/v1/transactions?select=*&order=ts.desc&limit=300'),
     sbFetch('/rest/v1/staff?select=*')
   ]);
   materials = (mats || []).map(function(m) {
-    return { id: m.id, name: m.name, sku: m.sku || '', threshold: m.threshold || 5, colors: m.colors || [], photo: m.photo_url || null, createdAt: m.created_at };
+    return { id: m.id, name: m.name, sku: m.sku || '', threshold: m.threshold || 5, colors: m.colors || [], photo: m.photo_url || null, createdAt: m.created_at, sortOrder: m.sort_order || 0 };
   });
   transactions = (txs || []).map(function(t) {
     return { ts: t.ts, matId: t.material_id, matName: t.material_name, colorName: t.color_name, type: t.qty_change < 0 ? 'collect' : 'return', qty: Math.abs(t.qty_change), job: t.job, staff: t.staff };
@@ -449,7 +450,7 @@ async function saveMaterial(m) {
   await sbFetch('/rest/v1/materials', {
     method: 'POST',
     headers: { 'Prefer': 'resolution=merge-duplicates' },
-    body: JSON.stringify({ id: m.id, name: m.name, sku: m.sku, threshold: m.threshold, colors: m.colors, photo_url: m.photo, created_at: m.createdAt })
+    body: JSON.stringify({ id: m.id, name: m.name, sku: m.sku, threshold: m.threshold, colors: m.colors, photo_url: m.photo, created_at: m.createdAt, sort_order: m.sortOrder || 0 })
   });
   hideSync();
 }
@@ -630,7 +631,8 @@ async function addMaterial() {
   var colors = getColorRows('color-entries');
   if (!colors.length) colors = [{ hex:'#888888', name:'Standard', qty:0 }];
   var id = genId();
-  var m = { id: id, name: name, sku: sku, threshold: threshold, colors: colors, photo: null, createdAt: Date.now() };
+  var maxOrder = materials.reduce(function(mx,x){ return Math.max(mx, x.sortOrder||0); }, 0);
+  var m = { id: id, name: name, sku: sku, threshold: threshold, colors: colors, photo: null, createdAt: Date.now(), sortOrder: maxOrder + 1000 };
   // Upload photo if selected
   var photoInput = document.getElementById('new-photo-input');
   if (photoInput._file) {
@@ -653,8 +655,10 @@ async function addMaterial() {
 async function duplicateMaterial(id) {
   var src = materials.find(function(x){ return x.id===id; }); if (!src) return;
   var newId = genId();
-  var clone = { id: newId, name: src.name+' (copy)', sku: src.sku ? src.sku+'-B' : '', threshold: src.threshold, colors: src.colors.map(function(c){ return {hex:c.hex,name:c.name,qty:0}; }), photo: src.photo || null, createdAt: Date.now() };
   var idx = materials.findIndex(function(x){ return x.id===id; });
+  var nextOrder = idx + 1 < materials.length ? (materials[idx+1].sortOrder || 0) : (src.sortOrder || 0) + 2000;
+  var cloneOrder = Math.round(((src.sortOrder || 0) + nextOrder) / 2);
+  var clone = { id: newId, name: src.name+' (copy)', sku: src.sku ? src.sku+'-B' : '', threshold: src.threshold, colors: src.colors.map(function(c){ return {hex:c.hex,name:c.name,qty:0}; }), photo: src.photo || null, createdAt: Date.now(), sortOrder: cloneOrder };
   materials.splice(idx+1, 0, clone);
   try { await saveMaterial(clone); } catch(e) { alert('Error: ' + e.message); return; }
   render();
@@ -702,15 +706,25 @@ function thumbHtml(m) {
   return '<div class="mat-thumb"><i class="ti ti-package"></i></div>';
 }
 
+var dragSrcId = null;
+
 function renderAdminList() {
   var el = document.getElementById('admin-list');
   var list = getFilteredMaterials('admin-search');
   if (!list.length) { el.innerHTML = '<div class="no-items">No materials found.</div>'; return; }
+  var searching = (document.getElementById('admin-search').value || '').trim().length > 0;
   var h = '';
   list.forEach(function(m) {
-    h += '<div class="mat-item">' + thumbHtml(m) + '<div style="flex:1;min-width:0;"><div class="mat-name">'+m.name+'</div><div class="mat-meta">'+(m.sku?'SKU: '+m.sku+' &middot; ':'')+m.colors.length+' colour'+(m.colors.length!==1?'s':'')+'</div><div class="color-dots">'+m.colors.map(function(c){ return '<span class="cdot" style="background:'+c.hex+'" data-tip="'+c.name+': '+c.qty+'"></span>'; }).join('')+'</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;"><span class="stock-pill '+stockClass(m)+'">'+stockLabel(m)+'</span><div class="item-btns"><button class="btn sm clone" data-action="dup" data-id="'+m.id+'" title="Duplicate"><i class="ti ti-copy"></i> <span>Dup</span></button><button class="btn sm" data-action="qr" data-id="'+m.id+'" title="QR"><i class="ti ti-qrcode"></i></button><button class="btn sm" data-action="edit" data-id="'+m.id+'" title="Edit"><i class="ti ti-edit"></i></button><button class="btn sm danger" data-action="del" data-id="'+m.id+'" title="Delete"><i class="ti ti-trash"></i></button></div></div></div>';
+    h += '<div class="mat-item" draggable="' + (!searching) + '" data-id="'+m.id+'" style="' + (!searching ? 'cursor:grab;' : '') + '">' +
+      (!searching ? '<div style="color:var(--text-3);font-size:20px;padding:0 4px 0 0;cursor:grab;flex-shrink:0;"><i class="ti ti-grip-vertical"></i></div>' : '') +
+      thumbHtml(m) +
+      '<div style="flex:1;min-width:0;"><div class="mat-name">'+m.name+'</div><div class="mat-meta">'+(m.sku?'SKU: '+m.sku+' &middot; ':'')+m.colors.length+' colour'+(m.colors.length!==1?'s':'')+'</div><div class="color-dots">'+m.colors.map(function(c){ return '<span class="cdot" style="background:'+c.hex+'" data-tip="'+c.name+': '+c.qty+'"></span>'; }).join('')+'</div></div>' +
+      '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;"><span class="stock-pill '+stockClass(m)+'">'+stockLabel(m)+'</span><div class="item-btns"><button class="btn sm clone" data-action="dup" data-id="'+m.id+'" title="Duplicate"><i class="ti ti-copy"></i> <span>Dup</span></button><button class="btn sm" data-action="qr" data-id="'+m.id+'" title="QR"><i class="ti ti-qrcode"></i></button><button class="btn sm" data-action="edit" data-id="'+m.id+'" title="Edit"><i class="ti ti-edit"></i></button><button class="btn sm danger" data-action="del" data-id="'+m.id+'" title="Delete"><i class="ti ti-trash"></i></button></div></div>' +
+      '</div>';
   });
   el.innerHTML = h;
+
+  // Button events
   el.querySelectorAll('[data-action]').forEach(function(btn) {
     btn.addEventListener('click', function(e) {
       e.stopPropagation();
@@ -721,6 +735,57 @@ function renderAdminList() {
       else if(action==='del') deleteMaterial(id);
     });
   });
+
+  // Drag-and-drop
+  if (!searching) {
+    el.querySelectorAll('.mat-item[draggable]').forEach(function(item) {
+      item.addEventListener('dragstart', function(e) {
+        dragSrcId = item.getAttribute('data-id');
+        item.style.opacity = '0.4';
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      item.addEventListener('dragend', function() {
+        item.style.opacity = '1';
+        el.querySelectorAll('.mat-item').forEach(function(i){ i.classList.remove('drag-over'); });
+      });
+      item.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        el.querySelectorAll('.mat-item').forEach(function(i){ i.classList.remove('drag-over'); });
+        item.classList.add('drag-over');
+      });
+      item.addEventListener('drop', function(e) {
+        e.preventDefault();
+        var targetId = item.getAttribute('data-id');
+        if (!dragSrcId || dragSrcId === targetId) return;
+        // Reorder in memory
+        var srcIdx = materials.findIndex(function(m){ return m.id === dragSrcId; });
+        var tgtIdx = materials.findIndex(function(m){ return m.id === targetId; });
+        var moved = materials.splice(srcIdx, 1)[0];
+        var newTgt = materials.findIndex(function(m){ return m.id === targetId; });
+        materials.splice(newTgt, 0, moved);
+        // Reassign sort orders
+        materials.forEach(function(m, i){ m.sortOrder = (i + 1) * 1000; });
+        renderAdminList();
+        renderTradesmanList();
+        // Save new order to Supabase
+        saveSortOrder();
+      });
+    });
+  }
+}
+
+async function saveSortOrder() {
+  showSync();
+  try {
+    await Promise.all(materials.map(function(m) {
+      return sbFetch('/rest/v1/materials?id=eq.' + m.id, {
+        method: 'PATCH',
+        body: JSON.stringify({ sort_order: m.sortOrder })
+      });
+    }));
+  } catch(e) { console.error('Sort order save failed:', e); }
+  hideSync();
 }
 
 function renderTradesmanList() {
